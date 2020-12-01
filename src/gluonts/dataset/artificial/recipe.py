@@ -15,6 +15,9 @@
 import functools
 import itertools
 import operator
+import textwrap
+from types import SimpleNamespace
+import doctest
 from typing import (
     Any,
     Callable,
@@ -25,6 +28,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 
 # Third-party imports
@@ -35,14 +39,23 @@ import pandas as pd
 from gluonts.core.component import validated
 from gluonts.dataset.common import DataEntry
 
+
 ValueOrCallable = Union[Any, Callable]
-Recipe = List[Tuple[str, Callable]]
+Recipe = Union[
+    Callable, List[Callable], List[Tuple[str, Callable]], Dict[str, Callable]
+]
 Env = Dict[str, Any]
 
 
 def resolve(val_or_callable: ValueOrCallable, context: Env, *args, **kwargs):
     if callable(val_or_callable):
-        return val_or_callable(context, *args, **kwargs)
+        key = f"_ref_{id(val_or_callable)}"
+        if key not in context:
+            r = val_or_callable(context, *args, **kwargs)
+            context[key] = r
+            if "field_name" in kwargs:
+                context[kwargs["field_name"]] = r
+        return context[key]
     elif isinstance(val_or_callable, str):
         return context[val_or_callable]
     else:
@@ -51,7 +64,7 @@ def resolve(val_or_callable: ValueOrCallable, context: Env, *args, **kwargs):
 
 def generate(
     length: int,
-    recipe: Union[Callable, Recipe],
+    recipe: Recipe,
     start: pd.Timestamp,
     global_state: Optional[dict] = None,
     seed: int = 0,
@@ -62,75 +75,121 @@ def generate(
     if global_state is None:
         global_state = {}
 
-    if isinstance(recipe, list):
+    if isinstance(recipe, (dict, list)):
         for x in itertools.count():
-            data: DataEntry = {}
-            for k, f in recipe:
-                data[k] = resolve(
-                    f,
-                    data,
-                    length=length,
-                    field_name=k,
-                    global_state=global_state,
-                )
+            data = evaluate(recipe, length=length, global_state=global_state)
             yield dict(**data, item_id=item_id_prefix + str(x), start=start)
     else:
-        assert callable(recipe)
+        assert callable(
+            recipe
+        ), "generate can only be used with dictionary recipes"
         for x in itertools.count():
             data = recipe(length=length, global_state=global_state)
+            assert isinstance(
+                data, dict
+            ), "generate can only be used with dictionary recipes"
             yield dict(**data, item_id=item_id_prefix + str(x), start=start)
 
 
 def evaluate(
-    funcs: Recipe, length: int, *args, global_state: dict = None, **kwargs
-) -> Env:
+    recipe: Recipe,
+    length: ValueOrCallable,
+    *args,
+    global_state: dict = None,
+    **kwargs,
+) -> Any:
     if global_state is None:
         global_state = {}
 
+    context = {}
     if "length" in kwargs:
         del kwargs["length"]
     if "field_name" in kwargs:
         del kwargs["field_name"]
     if "global_state" in kwargs:
         del kwargs["global_state"]
+    if "context" in kwargs:
+        context = kwargs["context"]
+        del kwargs["context"]
 
-    data: DataEntry = {}
-    for k, f in funcs:
-        try:
-            data[k] = resolve(
-                f,
-                data,
-                length=length,
-                field_name=k,
-                global_state=global_state,
-                *args,
-                **kwargs
-            )
-        except ValueError as e:
-            raise ValueError('Error while evaluating key "{}"'.format(k), e)
+    length_value = resolve(
+        length,
+        context,
+        length=None,
+        global_state=global_state,
+        *args,
+        **kwargs,
+    )
 
-    return data
+    # convert previous format into dict
+    if isinstance(recipe, list) and len(recipe) > 0:
+        elem = recipe[0]
+        if (
+            isinstance(elem, (tuple, list))
+            and len(elem) == 2
+            and isinstance(elem[0], str)
+        ):
+            recipe = cast(List[Tuple[str, Callable]], recipe)
+            recipe = dict(recipe)
+
+    if isinstance(recipe, dict):
+        data: DataEntry = {}
+        for k, f in recipe.items():
+            try:
+                data[k] = resolve(
+                    f,
+                    context,
+                    length=length_value,
+                    field_name=k,
+                    global_state=global_state,
+                    *args,
+                    **kwargs,
+                )
+            except ValueError as e:
+                raise ValueError(f'Error while evaluating key "{k}"') from e
+        return data
+    elif callable(recipe):
+        return resolve(
+            recipe,
+            context,
+            length=length_value,
+            global_state=global_state,
+            *args,
+            **kwargs,
+        )
+    elif isinstance(recipe, list):
+        result = []
+        for i, ri in enumerate(recipe):
+            try:
+                result.append(
+                    resolve(
+                        ri,
+                        context,
+                        length=length_value,
+                        global_state=global_state,
+                        *args,
+                        **kwargs,
+                    )
+                )
+            except ValueError as e:
+                raise ValueError(
+                    f"Error when evaluating entry {i} or recipe"
+                ) from e
+        return result
+    else:
+        raise ValueError(f"Invalid type for recipe {recipe}")
 
 
 def make_func(
-    length: int, funcs: Recipe, global_state=None
+    length: int, recipe: Recipe, global_state=None
 ) -> Callable[[int, Env], DataEntry]:
     if global_state is None:
         global_state = {}
 
     def f(length=length, global_state=global_state, *args, **kwargs):
-        data = {}
-        for k, f in funcs:
-            data[k] = resolve(
-                f,
-                data,
-                length=length,
-                field_name=k,
-                global_state=global_state,
-                *args,
-                **kwargs
-            )
-        return data
+        return evaluate(
+            recipe, length=length, global_state=global_state, *args, **kwargs
+        )
 
     return f
 
@@ -152,32 +211,56 @@ class Debug:
 
 
 class Lifted:
+    num_outputs: int = 1
+
     def __add__(self, other):
-        return LiftedAdd(self, other)
+        return _LiftedBinaryOp(self, other, "+")
 
     def __radd__(self, other):
-        return LiftedAdd(other, self)
+        return _LiftedBinaryOp(other, self, "+")
 
     def __sub__(self, other):
-        return LiftedSub(self, other)
+        return _LiftedBinaryOp(self, other, "-")
 
     def __rsub__(self, other):
-        return LiftedSub(other, self)
+        return _LiftedBinaryOp(other, self, "-")
 
     def __mul__(self, other):
-        return LiftedMul(self, other)
+        return _LiftedBinaryOp(self, other, "*")
 
     def __rmul__(self, other):
-        return LiftedMul(other, self)
+        return _LiftedBinaryOp(other, self, "*")
 
     def __truediv__(self, other):
-        return LiftedTruediv(self, other)
+        return _LiftedBinaryOp(self, other, "/")
 
     def __rtruediv__(self, other):
-        return LiftedTruediv(other, self)
+        return _LiftedBinaryOp(other, self, "/")
 
     def __pow__(self, other):
-        return LiftedBinaryOp(self, other, operator.pow)
+        return _LiftedBinaryOp(self, other, "**")
+
+    def __gt__(self, other):
+        return _LiftedBinaryOp(self, other, ">")
+
+    def __ge__(self, other):
+        return _LiftedBinaryOp(self, other, ">=")
+
+    def __lt__(self, other):
+        return _LiftedBinaryOp(self, other, "<")
+
+    def __le__(self, other):
+        return _LiftedBinaryOp(self, other, "<=")
+
+    def __eq__(self, other):
+        return _LiftedBinaryOp(self, other, "==")
+
+    def __ne__(self, other):
+        return _LiftedBinaryOp(self, other, "!=")
+
+    def __iter__(self):
+        for i in range(self.num_outputs):
+            yield _LiftedUnpacked(self, i)
 
     def __call__(
         self,
@@ -186,45 +269,201 @@ class Lifted:
         field_name: str,
         global_state: Dict,
         *args,
-        **kwargs
+        **kwargs,
     ):
         pass
 
 
-class LiftedBinaryOp(Lifted):
+class NumpyFunc(Lifted):
+    @validated()
+    def __init__(
+        self,
+        func: str,
+        func_args: Tuple[Any, ...],
+        func_kwargs: Dict[str, Any],
+    ):
+        import numpy
+
+        splits = func.split(".")
+        b = numpy
+        for s in splits:
+            b = getattr(b, s)
+        self.func = b
+        self.func_args = func_args
+        self.func_kwargs = func_kwargs
+
+    def __call__(self, *args, **kwargs):
+        func_args = [resolve(x, *args, **kwargs) for x in self.func_args]
+        func_kwargs = {
+            k: resolve(v, *args, **kwargs) for k, v in self.func_kwargs.items()
+        }
+        return self.func(*func_args, **func_kwargs)
+
+
+lifted_numpy = SimpleNamespace()
+lifted_numpy.random = SimpleNamespace()
+
+_NUMPY_FUNC_NAMES = [
+    "arange",
+    "argmax",
+    "argmin",
+    "clip",
+    "concatenate",
+    "convolve",
+    "exp",
+    "isfinite",
+    "isinf",
+    "isnan",
+    "log",
+    "log10",
+    "max",
+    "mean",
+    "min",
+    "nan_to_num",
+    "nanargmax",
+    "nanargmin",
+    "nanmax",
+    "nanmean",
+    "nanmin",
+    "nanpercentile",
+    "nanquantile",
+    "nansum",
+    "ones",
+    "ones_like",
+    "percentile",
+    "quantile",
+    "random.choice",
+    "random.normal",
+    "random.randn",
+    "random.uniform",
+    "repeat",
+    "reshape",
+    "shape",
+    "stack",
+    "sum",
+    "unique",
+    "zeros",
+    "zeros_like",
+]
+
+
+for func_name in _NUMPY_FUNC_NAMES:
+    normalized_func_name = f"_np_shim_{func_name.replace('.', '_')}"
+    if normalized_func_name in globals():
+        continue
+
+    s = f"""
+    @functools.wraps(np.{func_name})
+    def {normalized_func_name}(*args, **kwargs):
+        return NumpyFunc('{func_name}', args, kwargs)
+
+    lifted_numpy.{func_name} = {normalized_func_name}
+    # disable numpy docstring tests
+    lifted_numpy.{func_name}.__doc__ = lifted_numpy.{func_name}.__doc__.replace('>>>', '>>')
+    """
+    exec(textwrap.dedent(s))
+
+
+class Length(Lifted):
+    @validated()
+    def __init__(self, l: ValueOrCallable):
+        self.l = l
+
+    def __call__(self, x: Env, *args, **kwargs):
+        return len(resolve(self.l, x, *args, **kwargs))
+
+
+def lift(input: Union[int, Callable]):
+    """
+    Use this decorator to lift a function.
+
+    @lift
+    def f(x, y, length=None)
+
+    or if your function returns more results
+
+    @lift(2)
+    def f(x, y, length=None)
+
+    You can then use your function as part of a recipe. The function is called
+    with all all arguments being already resolved.
+
+    Note that you cannot serialize recipes that use the lift decorated functions.
+    """
+    if isinstance(input, int):
+        num_outs = input
+    else:
+        num_outs = 1
+
+    def w(f):
+        @functools.wraps(f)
+        def g(*f_args, **f_kwargs):
+            class Tmp(Lifted):
+                num_outputs = num_outs
+
+                @validated()
+                def __init__(self, f, f_args, f_kwargs):
+                    self.f = f
+                    self.f_args = f_args
+                    self.f_kwargs = f_kwargs
+
+                def __call__(self, x: Env, length: int, *args, **kwargs):
+                    resolved_f_args = [
+                        resolve(a, x, length, *args, **kwargs)
+                        for a in self.f_args
+                    ]
+                    resolved_f_kwargs = {
+                        k: resolve(v, x, length, *args, **kwargs)
+                        for k, v in self.f_kwargs.items()
+                    }
+                    return self.f(
+                        *resolved_f_args, **resolved_f_kwargs, length=length
+                    )
+
+            return Tmp(f, f_args, f_kwargs)
+
+        return g
+
+    if isinstance(input, int):
+        return w
+    else:
+        return w(input)
+
+
+class _LiftedUnpacked(Lifted):
+    @validated()
+    def __init__(self, base: Lifted, i: int):
+        self.base = base
+        self.i = i
+
+    def __call__(self, *args, **kwargs):
+        v = resolve(self.base, *args, **kwargs)
+        return v[self.i]
+
+
+class _LiftedBinaryOp(Lifted):
+    @validated()
     def __init__(self, left, right, op) -> None:
         self.left = left
         self.right = right
-        self.op = op
+        self.op = {
+            "+": operator.add,
+            "*": operator.mul,
+            "-": operator.sub,
+            "/": operator.truediv,
+            "**": operator.pow,
+            ">": operator.gt,
+            ">=": operator.ge,
+            "<": operator.lt,
+            "<=": operator.le,
+            "==": operator.eq,
+            "!=": operator.ne,
+        }[op]
 
     def __call__(self, *args, **kwargs):
         left = resolve(self.left, *args, **kwargs)
         right = resolve(self.right, *args, **kwargs)
         return self.op(left, right)
-
-
-class LiftedAdd(LiftedBinaryOp):
-    @validated()
-    def __init__(self, left, right) -> None:
-        super().__init__(left, right, operator.add)
-
-
-class LiftedSub(LiftedBinaryOp):
-    @validated()
-    def __init__(self, left, right) -> None:
-        super().__init__(left, right, operator.sub)
-
-
-class LiftedMul(LiftedBinaryOp):
-    @validated()
-    def __init__(self, left, right) -> None:
-        super().__init__(left, right, operator.mul)
-
-
-class LiftedTruediv(LiftedBinaryOp):
-    @validated()
-    def __init__(self, left, right) -> None:
-        super().__init__(left, right, operator.truediv)
 
 
 class RandomGaussian(Lifted):
@@ -334,7 +573,7 @@ class NormalizeMax(Lifted):
         self.input = input
 
     def __call__(self, x: Env, *args, **kwargs):
-        inp = resolve(self.input, x, *args, kwargs)
+        inp = resolve(self.input, x, *args, **kwargs)
         return inp / np.max(inp)
 
 
@@ -426,7 +665,7 @@ class ForEachCat(Lifted):
         field_name: str,
         global_state: Dict,
         *args,
-        **kwargs
+        **kwargs,
     ):
         c = x[self.cat_field][self.cat_idx]
         if field_name not in global_state:
@@ -546,9 +785,18 @@ class StackPrefix(Lifted):
         return np.stack(inputs, axis=0)
 
 
+_LEGACY_WARNING_WAS_SHOWN = False
+
+
 class Ref(Lifted):
     @validated()
     def __init__(self, field_name: str) -> None:
+        global _LEGACY_WARNING_WAS_SHOWN
+        if not _LEGACY_WARNING_WAS_SHOWN:
+            import warnings
+
+            warnings.warn("Ref is deprecated. Please use the functional api.",)
+            _LEGACY_WARNING_WAS_SHOWN = True
         self.field_name = field_name
 
     def __call__(self, x: Env, length: int, *args, **kwargs):
@@ -675,10 +923,15 @@ class Choose(Lifted):
 
 class EvalRecipe(Lifted):
     @validated()
-    def __init__(self, recipe: Recipe, op: ValueOrCallable) -> None:
+    def __init__(
+        self, recipe: Recipe, op: Optional[ValueOrCallable] = None
+    ) -> None:
         self.recipe = recipe
         self.op = op
 
     def __call__(self, x: Env, *args, **kwargs):
         xx = evaluate(self.recipe, *args, **kwargs)
-        return resolve(self.op, xx, *args, **kwargs)
+        if self.op is not None:
+            return resolve(self.op, xx, *args, **kwargs)
+        else:
+            return xx

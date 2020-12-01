@@ -17,7 +17,7 @@ import os
 import tempfile
 import time
 import uuid
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Union, Callable
 
 # Third-party imports
 import mxnet as mx
@@ -26,11 +26,13 @@ import mxnet.gluon.nn as nn
 import numpy as np
 
 # First-party imports
-from gluonts.core.component import get_mxnet_context, validated
+from gluonts.core.component import validated
 from gluonts.core.exception import GluonTSDataError, GluonTSUserError
 from gluonts.dataset.loader import TrainDataLoader, ValidationDataLoader
 from gluonts.gluonts_tqdm import tqdm
+from gluonts.mx.context import get_mxnet_context
 from gluonts.support.util import HybridContext
+from mxnet.metric import ndarray
 
 # Relative imports
 from . import learning_rate_scheduler as lrs
@@ -39,11 +41,7 @@ from .model_averaging import (
     SelectNBestMean,
     save_epoch_info,
 )
-from .model_iteration_averaging import (
-    IterationAveragingStrategy,
-    NTA,
-    Alpha_Suffix,
-)
+from .model_iteration_averaging import IterationAveragingStrategy
 
 logger = logging.getLogger("gluonts").getChild("trainer")
 
@@ -101,6 +99,12 @@ class Trainer:
     init
         Initializer of the weights of the network (default: "xavier").
     hybridize
+        If set to true the network will be hybridized before training
+    post_initialize_cb
+        An optional callback function. If provided the function will be called with the
+        initialized network `post_initialize_cb(net)` before the training starts.
+        This callback can be used to e.g. overwrite parameters for warm starting, to freeze some
+        of the network parameters etc.
     """
 
     @validated()
@@ -121,6 +125,7 @@ class Trainer:
         avg_strategy: Union[
             AveragingStrategy, IterationAveragingStrategy
         ] = SelectNBestMean(num_models=1),
+        post_initialize_cb: Optional[Callable[[mx.gluon.Block], None]] = None,
     ) -> None:
 
         assert (
@@ -157,6 +162,7 @@ class Trainer:
         self.avg_strategy = avg_strategy
         self.ctx = ctx if ctx is not None else get_mxnet_context()
         self.halt = False
+        self.post_initialize_cb = post_initialize_cb
 
     def set_halt(self, signum: int, stack_frame: Any) -> None:
         logger.info("Received signal: {}".format(signum))
@@ -173,10 +179,25 @@ class Trainer:
     def __call__(
         self,
         net: nn.HybridBlock,
-        input_names: List[str],
         train_iter: TrainDataLoader,
         validation_iter: Optional[ValidationDataLoader] = None,
     ) -> None:  # TODO: we may want to return some training information here
+        """
+        Train a network, given an iterable over training (and optionally validation) batches.
+
+        Parameters
+        ----------
+        net
+            Network to be trained. This a Gluon HybridBlock, assumed to produce a tensor
+            of loss values as output.
+        train_iter
+            An iterable over batches to be used for training. Batches are assumed to be
+            dictionaries, whose values are MXNet arrays that correspond to the network
+            inputs.
+        validation_iter
+            Similar to `train_iter` but the batches produced here are used to compute
+            validation metrics.
+        """
         is_validation_available = validation_iter is not None
         self.halt = False
 
@@ -228,9 +249,12 @@ class Trainer:
                     kvstore="device",  # FIXME: initialize properly
                 )
 
+                first_forward = True
+
                 def loop(
                     epoch_no, batch_iter, is_training: bool = True
                 ) -> mx.metric.Loss:
+                    nonlocal first_forward
                     tic = time.time()
 
                     epoch_loss = mx.metric.Loss()
@@ -242,14 +266,22 @@ class Trainer:
                         self.avg_strategy.load_averaged_model(net)
 
                     with tqdm(batch_iter) as it:
-                        for batch_no, data_entry in enumerate(it, start=1):
+                        for batch_no, batch in enumerate(it, start=1):
+                            # `batch` here is expected to be a dictionary whose fields
+                            # should correspond 1-to-1 with the network inputs
+                            # see below how `batch.values()` is fed into the network
+
                             if self.halt:
                                 break
 
-                            inputs = [data_entry[k] for k in input_names]
+                            if first_forward:
+                                first_forward = False
+                                _ = net(*batch.values())
+                                if self.post_initialize_cb:
+                                    self.post_initialize_cb(net)
 
                             with mx.autograd.record():
-                                output = net(*inputs)
+                                output = net(*batch.values())
 
                                 # network can returns several outputs, the first being always the loss
                                 # when having multiple outputs, the forward returns a list in the case of hybrid and a
@@ -260,26 +292,27 @@ class Trainer:
                                 else:
                                     loss = output
 
-                            if is_training:
-                                loss.backward()
-                                trainer.step(batch_size)
-
-                                # iteration averaging in training
-                                if isinstance(
-                                    self.avg_strategy,
-                                    IterationAveragingStrategy,
-                                ):
-                                    self.avg_strategy.apply(net)
-
-                            epoch_loss.update(None, preds=loss)
-                            lv = loss_value(epoch_loss)
-
-                            if not np.isfinite(lv):
+                            if not np.isfinite(ndarray.sum(loss).asscalar()):
                                 logger.warning(
-                                    "Epoch[%d] gave nan loss", epoch_no
+                                    "Batch [%d] of Epoch[%d] gave NaN loss and it will be ignored",
+                                    batch_no,
+                                    epoch_no,
                                 )
-                                return epoch_loss
+                            else:
+                                if is_training:
+                                    loss.backward()
+                                    trainer.step(batch_size)
 
+                                    # iteration averaging in training
+                                    if isinstance(
+                                        self.avg_strategy,
+                                        IterationAveragingStrategy,
+                                    ):
+                                        self.avg_strategy.apply(net)
+
+                                epoch_loss.update(None, preds=loss)
+
+                            lv = loss_value(epoch_loss)
                             it.set_postfix(
                                 ordered_dict={
                                     "epoch": f"{epoch_no + 1}/{self.epochs}",
@@ -345,6 +378,13 @@ class Trainer:
                         self.avg_strategy.apply(net)
 
                     should_continue = lr_scheduler.step(loss_value(epoch_loss))
+                    if isinstance(
+                        self.avg_strategy, IterationAveragingStrategy
+                    ):
+                        logging.info(
+                            "Overriding early stopping for iteration-based averaging strategies."
+                        )
+                        should_continue = True
                     if not should_continue:
                         logger.info("Stopping training")
                         break

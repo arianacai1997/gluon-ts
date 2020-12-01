@@ -15,6 +15,7 @@
 from typing import List, Optional, Tuple
 
 import numpy as np
+import mxnet as mx
 
 # Third-party imports
 from mxnet import gluon
@@ -24,7 +25,13 @@ from gluonts.core.component import validated
 from gluonts.model.common import Tensor
 
 # Relative imports
-from .distribution import Distribution, _expand_param, _index_tensor, getF
+from .distribution import (
+    Distribution,
+    _expand_param,
+    _index_tensor,
+    getF,
+    MAX_SUPPORT_VAL,
+)
 from .distribution_output import DistributionOutput
 
 
@@ -37,7 +44,7 @@ class MixtureDistribution(Distribution):
     mixture_probs
         A tensor of mixing probabilities. The entries should all be positive
         and sum to 1 across the last dimension. Shape: (..., k), where k is
-        the number of distributions to be mixed. All axis except the last one
+        the number of distributions to be mixed. All axes except the last one
         should either coincide with the ones from the component distributions,
         or be 1 (in which case, the mixing coefficient is shared across
         the axis).
@@ -60,16 +67,55 @@ class MixtureDistribution(Distribution):
         # self.all_same = len(set(c.__class__.__name__ for c in components)) == 1
         self.mixture_probs = mixture_probs
         self.components = components
+        if not isinstance(mixture_probs, mx.sym.Symbol):
+
+            # assert that all components have the same batch shape
+            assert np.all(
+                [d.batch_shape == self.batch_shape for d in components[1:]]
+            ), "All component distributions must have the same batch_shape."
+
+            # assert that mixture_probs has the right shape
+            assertion_message = f"""mixture_probs have shape {mixture_probs.shape}, but expected shape: (..., k), 
+                                    where k is len(components)={len(components)}. 
+                                    All axes except the last one should either coincide with the ones from the 
+                                    component distributions, 
+                                    or be 1 (in which case, the mixing coefficient is shared across
+                                    the axis)."""
+
+            expected_shape = self.batch_shape + (len(components),)
+            assert len(expected_shape) == len(self.mixture_probs.shape), (
+                assertion_message
+                + " Maybe you need to expand the shape of mixture_probs at the zeroth axis."
+            )
+            for expected_dim, given_dim in zip(
+                expected_shape, self.mixture_probs.shape
+            ):
+                assert (
+                    expected_dim == given_dim
+                ) or given_dim == 1, assertion_message
 
     @property
     def F(self):
         return getF(self.mixture_probs)
 
+    @property
+    def support_min_max(self) -> Tuple[Tensor, Tensor]:
+        F = self.F
+        lb = F.ones(self.batch_shape) * MAX_SUPPORT_VAL
+        ub = F.ones(self.batch_shape) * -MAX_SUPPORT_VAL
+        for c in self.components:
+            c_lb, c_ub = c.support_min_max
+            lb = F.broadcast_minimum(lb, c_lb)
+            ub = F.broadcast_maximum(ub, c_ub)
+        return lb, ub
+
     def __getitem__(self, item):
-        return MixtureDistribution(
-            _index_tensor(self.mixture_probs, item),
-            [c[item] for c in self.components],
-        )
+        mp = _index_tensor(self.mixture_probs, item)
+        # fix edge case: if batch_shape == (1,) the mixture_probs shape is squeezed to (k,)
+        # reshape it to (1, k)
+        if len(mp.shape) == 1:
+            mp = mp.reshape(1, -1)
+        return MixtureDistribution(mp, [c[item] for c in self.components],)
 
     @property
     def batch_shape(self) -> Tuple:
@@ -219,3 +265,7 @@ class MixtureDistributionOutput(DistributionOutput):
     @property
     def event_shape(self) -> Tuple:
         return self.distr_outputs[0].event_shape
+
+    @property
+    def value_in_support(self) -> float:
+        return self.distr_outputs[0].value_in_support

@@ -13,7 +13,6 @@
 
 # Standard library imports
 import abc
-from functools import reduce
 from typing import Callable, Iterable, Iterator, List
 
 # First-party imports
@@ -36,7 +35,7 @@ class Transformation(metaclass=abc.ABCMeta):
         pass
 
     def chain(self, other: "Transformation") -> "Chain":
-        return Chain(self, other)
+        return Chain([self, other])
 
     def __add__(self, other: "Transformation") -> "Chain":
         return self.chain(other)

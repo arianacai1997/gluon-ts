@@ -17,6 +17,7 @@ import pandas as pd
 import pytest
 
 # First-party imports
+from gluonts.core.component import validated
 from gluonts.core.serde import dump_code, load_code
 from gluonts.dataset.common import (
     BasicFeatureInfo,
@@ -24,8 +25,12 @@ from gluonts.dataset.common import (
     MetaData,
 )
 from gluonts.dataset.artificial import RecipeDataset
+import gluonts.dataset.artificial.recipe as rcp
+from gluonts.dataset.artificial.recipe import lifted_numpy as lnp
+
 from gluonts.dataset.artificial.recipe import (
     Add,
+    Lifted,
     BinaryMarkovChain,
     Constant,
     ConstantVec,
@@ -46,6 +51,7 @@ from gluonts.dataset.artificial.recipe import (
     evaluate,
     generate,
     take_as_list,
+    Env,
 )
 
 BASE_RECIPE = [("foo", ConstantVec(1.0)), ("cat", RandomCat([10]))]
@@ -162,3 +168,64 @@ def test_generate(recipe) -> None:
         iterator=generate(length=10, recipe=BASE_RECIPE, start=start), num=10
     )
     assert len(result) == 10
+
+
+def test_two() -> None:
+    class Two(Lifted):
+        num_outputs = 2
+
+        @validated()
+        def __init__(self):
+            pass
+
+        def __call__(self, x: Env, length: int, *args, **kwargs):
+            return np.random.randn(length), np.random.randn(length)
+
+    a, b = Two()
+    evaluate(a, 100)
+
+
+def test_functional() -> None:
+    daily_smooth_seasonality = SmoothSeasonality(period=288, phase=-72)
+    noise = RandomGaussian(stddev=0.1)
+    signal = daily_smooth_seasonality + noise
+
+    recipe = dict(
+        daily_smooth_seasonality=daily_smooth_seasonality,
+        noise=noise,
+        signal=signal,
+    )
+    res = evaluate(recipe, length=100)
+    for k in recipe.keys():
+        assert k in res
+        assert len(res[k]) == 100
+
+
+def test_lifted_decorator() -> None:
+    @rcp.lift
+    def something(a, b, length):
+        return np.concatenate([a[:10], b[:10]])
+
+    noise1 = lnp.random.uniform(size=1000)
+    noise2 = lnp.random.uniform(size=1000)
+    res = something(noise1, noise2)
+    length = rcp.Length(res)
+    res = evaluate(res, length=length)
+    assert len(res) == 20
+
+    @rcp.lift(2)
+    def something_else(a, b, length):
+        return a[:10], b[:10]
+
+    noise1 = lnp.random.uniform(size=1000)
+    noise2 = lnp.random.uniform(size=1000)
+    a, b = something_else(noise1, noise2)
+    res = evaluate([a, b], length=length)
+    assert len(res[0]) == 10
+    assert len(res[1]) == 10
+
+
+def test_length() -> None:
+    u = rcp.Constant(np.array([1, 2, 3, 4, 5, 6, 7]))
+    x = u * RandomGaussian()
+    assert len(evaluate(x, length=rcp.Length(u))) == 7

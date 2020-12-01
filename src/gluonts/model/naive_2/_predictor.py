@@ -12,7 +12,7 @@
 # permissions and limitations under the License.
 
 # Standard library imports
-from typing import Iterator, Optional
+from typing import Optional
 
 # Third-party imports
 import numpy as np
@@ -23,10 +23,10 @@ import statsmodels.api as sm
 # First-party imports
 from gluonts.core.component import validated
 from gluonts.dataset.common import DataEntry
-from gluonts.evaluation import get_seasonality
 from gluonts.model.forecast import Forecast, SampleForecast
 from gluonts.model.predictor import RepresentablePredictor
 from gluonts.support.pandas import forecast_start
+from gluonts.time_feature import get_seasonality
 
 
 def seasonality_test(past_ts_data: np.array, season_length: int) -> bool:
@@ -154,6 +154,7 @@ class Naive2Predictor(RepresentablePredictor):
 
     def predict_item(self, item: DataEntry) -> Forecast:
         past_ts_data = item["target"]
+        item_id = item.get("item_id", None)
         forecast_start_time = forecast_start(item)
 
         assert (
@@ -164,4 +165,9 @@ class Naive2Predictor(RepresentablePredictor):
 
         samples = np.array([prediction])
 
-        return SampleForecast(samples, forecast_start_time, self.freq)
+        return SampleForecast(
+            samples=samples,
+            start_date=forecast_start_time,
+            freq=self.freq,
+            item_id=item_id,
+        )

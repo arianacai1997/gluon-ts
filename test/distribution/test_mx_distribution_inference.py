@@ -17,6 +17,7 @@ distributions exposed to the user.
 """
 # Standard library imports
 from typing import Iterable, List, Tuple
+from functools import reduce
 
 # Third-party imports
 import mxnet as mx
@@ -48,12 +49,16 @@ from gluonts.mx.distribution import (
     DirichletMultinomialOutput,
     NegativeBinomial,
     NegativeBinomialOutput,
+    ZeroInflatedNegativeBinomialOutput,
     Laplace,
     LaplaceOutput,
     Gaussian,
     GaussianOutput,
+    GenPareto,
+    GenParetoOutput,
     Poisson,
     PoissonOutput,
+    ZeroInflatedPoissonOutput,
     PiecewiseLinear,
     PiecewiseLinearOutput,
     Binned,
@@ -62,6 +67,12 @@ from gluonts.mx.distribution import (
     CategoricalOutput,
     LogitNormal,
     LogitNormalOutput,
+    ZeroInflatedBeta,
+    OneInflatedBeta,
+    ZeroAndOneInflatedBeta,
+    ZeroInflatedBetaOutput,
+    ZeroAndOneInflatedBetaOutput,
+    OneInflatedBetaOutput,
 )
 from gluonts.mx.distribution.transformed_distribution_output import (
     TransformedDistributionOutput,
@@ -69,8 +80,14 @@ from gluonts.mx.distribution.transformed_distribution_output import (
 from gluonts.mx.distribution.transformed_distribution import (
     TransformedDistribution,
 )
+from gluonts.model.tpp.distribution import (
+    Loglogistic,
+    LoglogisticOutput,
+    Weibull,
+    WeibullOutput,
+)
 
-
+pytestmark = pytest.mark.timeout(60)
 NUM_SAMPLES = 2000
 BATCH_SIZE = 32
 TOL = 0.3
@@ -136,6 +153,7 @@ def maximum_likelihood_estimate_sgd(
                 if not hybridize:
                     assert loss.shape == distr.batch_shape
             loss.backward()
+
             trainer.step(BATCH_SIZE)
             num_batches += 1
 
@@ -149,9 +167,12 @@ def maximum_likelihood_estimate_sgd(
             param.asnumpy() for param in arg_proj(mx.nd.array(np.ones((1, 1))))
         ]
 
-    return [
-        param[0].asnumpy() for param in arg_proj(mx.nd.array(np.ones((1, 1))))
+    # alpha parameter of zero inflated Neg Bin was not returned using param[0]
+    ls = [
+        [p.asnumpy() for p in param]
+        for param in arg_proj(mx.nd.array(np.ones((1, 1))))
     ]
+    return reduce(lambda x, y: x + y, ls)
 
 
 @pytest.mark.parametrize("alpha, beta", [(3.75, 1.25)])
@@ -185,7 +206,106 @@ def test_beta_likelihood(alpha: float, beta: float, hybridize: bool) -> None:
     print("ALPHA:", alpha_hat, "BETA:", beta_hat)
     assert (
         np.abs(alpha_hat - alpha) < TOL * alpha
-    ), f"alpha did not match: alpha = {alpha}, alpha = {alpha_hat}"
+    ), f"alpha did not match: alpha = {alpha}, alpha_hat = {alpha_hat}"
+    assert (
+        np.abs(beta_hat - beta) < TOL * beta
+    ), f"beta did not match: beta = {beta}, beta_hat = {beta_hat}"
+
+
+@pytest.mark.parametrize("alpha, beta", [(3.75, 1.25)])
+@pytest.mark.parametrize("hybridize", [True, False])
+@pytest.mark.parametrize("inflated_at", ["zero", "one", "zero_and_one"])
+@pytest.mark.parametrize("zero_probability", [0.2])
+@pytest.mark.parametrize("one_probability", [0.1])
+def test_inflated_beta_likelihood(
+    alpha: float,
+    beta: float,
+    hybridize: bool,
+    inflated_at: str,
+    zero_probability: float,
+    one_probability: float,
+) -> None:
+    """
+    Test to check that maximizing the likelihood recovers the parameters
+    """
+
+    # generate samples
+    alphas = mx.nd.zeros((NUM_SAMPLES,)) + alpha
+    betas = mx.nd.zeros((NUM_SAMPLES,)) + beta
+
+    zero_probabilities = mx.nd.zeros((NUM_SAMPLES,)) + zero_probability
+    one_probabilities = mx.nd.zeros((NUM_SAMPLES,)) + one_probability
+    if inflated_at == "zero":
+        distr = ZeroInflatedBeta(
+            alphas, betas, zero_probability=zero_probabilities
+        )
+        distr_output = ZeroInflatedBetaOutput()
+    elif inflated_at == "one":
+        distr = OneInflatedBeta(
+            alphas, betas, one_probability=one_probabilities
+        )
+        distr_output = OneInflatedBetaOutput()
+
+    else:
+        distr = ZeroAndOneInflatedBeta(
+            alphas,
+            betas,
+            zero_probability=zero_probabilities,
+            one_probability=one_probabilities,
+        )
+        distr_output = ZeroAndOneInflatedBetaOutput()
+
+    samples = distr.sample()
+
+    init_biases = [
+        inv_softplus(alpha - START_TOL_MULTIPLE * TOL * alpha),
+        inv_softplus(beta - START_TOL_MULTIPLE * TOL * beta),
+    ]
+
+    parameters = maximum_likelihood_estimate_sgd(
+        distr_output,
+        samples,
+        init_biases=init_biases,
+        hybridize=hybridize,
+        learning_rate=PositiveFloat(0.05),
+        num_epochs=PositiveInt(10),
+    )
+
+    if inflated_at == "zero":
+        alpha_hat, beta_hat, zero_probability_hat = parameters
+
+        assert (
+            np.abs(zero_probability_hat[0] - zero_probability)
+            < TOL * zero_probability
+        ), f"zero_probability did not match: zero_probability = {zero_probability}, zero_probability_hat = {zero_probability_hat}"
+
+    elif inflated_at == "one":
+        alpha_hat, beta_hat, one_probability_hat = parameters
+
+        assert (
+            np.abs(one_probability_hat - one_probability)
+            < TOL * one_probability
+        ), f"one_probability did not match: one_probability = {one_probability}, one_probability_hat = {one_probability_hat}"
+    else:
+        (
+            alpha_hat,
+            beta_hat,
+            zero_probability_hat,
+            one_probability_hat,
+        ) = parameters
+
+        assert (
+            np.abs(zero_probability_hat - zero_probability)
+            < TOL * zero_probability
+        ), f"zero_probability did not match: zero_probability = {zero_probability}, zero_probability_hat = {zero_probability_hat}"
+        assert (
+            np.abs(one_probability_hat - one_probability)
+            < TOL * one_probability
+        ), f"one_probability did not match: one_probability = {one_probability}, one_probability_hat = {one_probability_hat}"
+
+    assert (
+        np.abs(alpha_hat - alpha) < TOL * alpha
+    ), f"alpha did not match: alpha = {alpha}, alpha_hat = {alpha_hat}"
     assert (
         np.abs(beta_hat - beta) < TOL * beta
     ), f"beta did not match: beta = {beta}, beta_hat = {beta_hat}"
@@ -266,7 +386,7 @@ def test_gamma_likelihood(alpha: float, beta: float, hybridize: bool) -> None:
 
     assert (
         np.abs(alpha_hat - alpha) < TOL * alpha
-    ), f"alpha did not match: alpha = {alpha}, alpha = {alpha_hat}"
+    ), f"alpha did not match: alpha = {alpha}, alpha_hat = {alpha_hat}"
     assert (
         np.abs(beta_hat - beta) < TOL * beta
     ), f"beta did not match: beta = {beta}, beta_hat = {beta_hat}"
@@ -916,3 +1036,223 @@ def test_logit_normal_likelihood(mu: float, sigma: float, hybridize: bool):
     assert (
         np.abs(sigma_hat - sigma) < TOL * sigma
     ), f"sigma did not match: sigma = {sigma}, sigma_hat = {sigma_hat}"
+
+
+@pytest.mark.parametrize("mu, sigma", [(1.25, 0.5)])
+@pytest.mark.parametrize("hybridize", [True, False])
+def test_loglogistic_likelihood(
+    mu: float, sigma: float, hybridize: bool
+) -> None:
+    """
+    Test to check that maximizing the likelihood recovers the parameters
+    """
+
+    # generate samples
+    mus = mx.nd.zeros((NUM_SAMPLES,)) + mu
+    sigmas = mx.nd.zeros((NUM_SAMPLES,)) + sigma
+
+    distr = Loglogistic(mus, sigmas)
+    samples = distr.sample()
+
+    init_biases = [
+        mu - START_TOL_MULTIPLE * TOL * mu,
+        inv_softplus(sigma - START_TOL_MULTIPLE * TOL * sigma),
+    ]
+
+    mu_hat, sigma_hat = maximum_likelihood_estimate_sgd(
+        LoglogisticOutput(),
+        samples,
+        init_biases=init_biases,
+        hybridize=hybridize,
+        learning_rate=PositiveFloat(0.05),
+        num_epochs=PositiveInt(10),
+    )
+
+    print("mu:", mu_hat, "sigma:", sigma_hat)
+    assert (
+        np.abs(mu_hat - mu) < TOL * mu
+    ), f"mu did not match: mu = {mu}, mu_hat = {mu_hat}"
+    assert (
+        np.abs(sigma_hat - sigma) < TOL * sigma
+    ), f"sigma did not match: sigma = {sigma}, sigma_hat = {sigma_hat}"
+
+
+@pytest.mark.parametrize("rate, shape", [(2.0, 1.5)])
+@pytest.mark.parametrize("hybridize", [True, False])
+def test_weibull_likelihood(
+    rate: float, shape: float, hybridize: bool
+) -> None:
+    """
+    Test to check that maximizing the likelihood recovers the parameters
+    """
+
+    # generate samples
+    rates = mx.nd.zeros((NUM_SAMPLES,)) + rate
+    shapes = mx.nd.zeros((NUM_SAMPLES,)) + shape
+
+    distr = Weibull(rates, shapes)
+    samples = distr.sample()
+
+    init_biases = [
+        inv_softplus(rate - START_TOL_MULTIPLE * TOL * rate),
+        inv_softplus(shape - START_TOL_MULTIPLE * TOL * shape),
+    ]
+
+    rate_hat, shape_hat = maximum_likelihood_estimate_sgd(
+        WeibullOutput(),
+        samples,
+        init_biases=init_biases,
+        hybridize=hybridize,
+        learning_rate=PositiveFloat(0.05),
+        num_epochs=PositiveInt(10),
+    )
+
+    print("rate:", rate_hat, "shape:", shape_hat)
+    assert (
+        np.abs(rate_hat - rate) < TOL * rate
+    ), f"rate did not match: rate = {rate}, rate_hat = {rate_hat}"
+    assert (
+        np.abs(shape_hat - shape) < TOL * shape
+    ), f"shape did not match: shape = {shape}, shape_hat = {shape_hat}"
+
+
+@pytest.mark.parametrize("xi, beta", [(1 / 3.0, 1.0)])
+@pytest.mark.parametrize("hybridize", [True, False])
+def test_genpareto_likelihood(xi: float, beta: float, hybridize: bool) -> None:
+    """
+    Test to check that maximizing the likelihood recovers the parameters
+    """
+
+    # generate samples
+    xis = mx.nd.zeros((NUM_SAMPLES,)) + xi
+    betas = mx.nd.zeros((NUM_SAMPLES,)) + beta
+
+    distr = GenPareto(xis, betas)
+    samples = distr.sample()
+
+    init_biases = [
+        inv_softplus(xi - START_TOL_MULTIPLE * TOL * xi),
+        inv_softplus(beta - START_TOL_MULTIPLE * TOL * beta),
+    ]
+
+    xi_hat, beta_hat = maximum_likelihood_estimate_sgd(
+        GenParetoOutput(),
+        samples,
+        init_biases=init_biases,
+        hybridize=hybridize,
+        learning_rate=PositiveFloat(0.05),
+        num_epochs=PositiveInt(10),
+    )
+
+    print("XI:", xi_hat, "BETA:", beta_hat)
+    assert (
+        np.abs(xi_hat - xi) < TOL * xi
+    ), f"alpha did not match: xi = {xi}, xi_hat = {xi_hat}"
+    assert (
+        np.abs(beta_hat - beta) < TOL * beta
+    ), f"beta did not match: beta = {beta}, beta_hat = {beta_hat}"
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.flaky(max_runs=6, min_passes=1)
+@pytest.mark.parametrize("rate", [50.0])
+@pytest.mark.parametrize("zero_probability", [0.8, 0.2, 0.01])
+@pytest.mark.parametrize("hybridize", [False, True])
+def test_inflated_poisson_likelihood(
+    rate: float, hybridize: bool, zero_probability: float,
+) -> None:
+    """
+    Test to check that maximizing the likelihood recovers the parameters
+    """
+    # generate samples
+    num_samples = 2000  # Required for convergence
+
+    distr = ZeroInflatedPoissonOutput().distribution(
+        distr_args=[
+            mx.nd.array([[1 - zero_probability, zero_probability]]),
+            mx.nd.array([rate]),
+            mx.nd.array([0.0]),
+        ]
+    )
+    distr_output = ZeroInflatedPoissonOutput()
+
+    samples = distr.sample(num_samples).squeeze()
+
+    init_biases = None
+
+    (_, zero_probability_hat), rate_hat, _ = maximum_likelihood_estimate_sgd(
+        distr_output=distr_output,
+        samples=samples,
+        init_biases=init_biases,
+        hybridize=hybridize,
+        learning_rate=PositiveFloat(0.15),
+        num_epochs=PositiveInt(25),
+    )
+
+    assert (
+        np.abs(zero_probability_hat - zero_probability)
+        < TOL * zero_probability
+    ), f"zero_probability did not match: zero_probability = {zero_probability}, zero_probability_hat = {zero_probability_hat}"
+
+    assert (
+        np.abs(rate_hat - rate) < TOL * rate
+    ), f"rate did not match: rate = {rate}, rate_hat = {rate_hat}"
+
+
+@pytest.mark.timeout(150)
+@pytest.mark.flaky(max_runs=6, min_passes=1)
+@pytest.mark.parametrize("mu", [5.0])
+@pytest.mark.parametrize("alpha", [0.05])
+@pytest.mark.parametrize("zero_probability", [0.3])
+@pytest.mark.parametrize("hybridize", [False, True])
+def test_inflated_neg_binomial_likelihood(
+    mu: float, alpha: float, zero_probability: float, hybridize: bool,
+) -> None:
+    """
+    Test to check that maximizing the likelihood recovers the parameters
+    """
+
+    # generate samples
+    num_samples = 2000  # Required for convergence
+
+    distr = ZeroInflatedNegativeBinomialOutput().distribution(
+        distr_args=[
+            mx.nd.array(
+                [[1 - zero_probability, zero_probability]]
+            ),  # mixture probs
+            mx.nd.array([mu, alpha]),  # loc, shape of Neg Bin
+            mx.nd.array([0.0]),
+        ]
+    )
+    distr_output = ZeroInflatedNegativeBinomialOutput()
+
+    samples = distr.sample(num_samples).squeeze()
+
+    init_biases = None
+
+    (
+        (_, zero_probability_hat),
+        mu_hat,
+        alpha_hat,
+        _,
+    ) = maximum_likelihood_estimate_sgd(
+        distr_output=distr_output,
+        samples=samples,
+        init_biases=init_biases,
+        hybridize=hybridize,
+        learning_rate=PositiveFloat(0.1),
+        num_epochs=PositiveInt(20),
+    )
+
+    assert (
+        np.abs(zero_probability_hat - zero_probability)
+        < TOL * zero_probability
+    ), f"zero_probability did not match: zero_probability = {zero_probability}, zero_probability_hat = {zero_probability_hat}"
+
+    assert (
+        np.abs(mu_hat - mu) < TOL * mu
+    ), f"mu did not match: mu = {mu}, mu_hat = {mu_hat}"
+
+    assert (
+        np.abs(alpha_hat - alpha) < TOL * alpha
+    ), f"alpha did not match: alpha = {alpha}, alpha_hat = {alpha_hat}"

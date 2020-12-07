@@ -11,26 +11,21 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-# Standard library imports
 from typing import List, Optional, Tuple
 
-import numpy as np
 import mxnet as mx
-
-# Third-party imports
+import numpy as np
 from mxnet import gluon
 
-# First-party imports
 from gluonts.core.component import validated
-from gluonts.model.common import Tensor
+from gluonts.mx import Tensor
 
-# Relative imports
 from .distribution import (
+    MAX_SUPPORT_VAL,
     Distribution,
     _expand_param,
     _index_tensor,
     getF,
-    MAX_SUPPORT_VAL,
 )
 from .distribution_output import DistributionOutput
 
@@ -115,7 +110,10 @@ class MixtureDistribution(Distribution):
         # reshape it to (1, k)
         if len(mp.shape) == 1:
             mp = mp.reshape(1, -1)
-        return MixtureDistribution(mp, [c[item] for c in self.components],)
+        return MixtureDistribution(
+            mp,
+            [c[item] for c in self.components],
+        )
 
     @property
     def batch_shape(self) -> Tuple:
@@ -153,8 +151,14 @@ class MixtureDistribution(Distribution):
     def mean(self) -> Tensor:
         F = self.F
         mean_values = F.stack(*[c.mean for c in self.components], axis=-1)
+        mixture_probs_expanded = self.mixture_probs
+        for _ in range(self.event_dim):
+            mixture_probs_expanded = mixture_probs_expanded.expand_dims(
+                axis=-2
+            )
         return F.sum(
-            F.broadcast_mul(mean_values, self.mixture_probs, axis=-1), axis=-1
+            F.broadcast_mul(mean_values, mixture_probs_expanded, axis=-1),
+            axis=-1,
         )
 
     def cdf(self, x: Tensor) -> Tensor:

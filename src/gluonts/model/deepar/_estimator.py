@@ -13,23 +13,18 @@
 
 from typing import List, Optional
 
-# Standard library imports
 import numpy as np
-
-# Third-party imports
 from mxnet.gluon import HybridBlock
 
-# First-party imports
 from gluonts.core.component import DType, validated
 from gluonts.dataset.field_names import FieldName
 from gluonts.dataset.stat import calculate_dataset_statistics
-from gluonts.model.estimator import GluonEstimator
+from gluonts.mx.model.estimator import GluonEstimator
 from gluonts.model.predictor import Predictor
-from gluonts.mx.model.predictor import RepresentableBlockPredictor
-
 from gluonts.mx.distribution import DistributionOutput, StudentTOutput
+from gluonts.mx.model.predictor import RepresentableBlockPredictor
 from gluonts.mx.trainer import Trainer
-from gluonts.support.util import copy_parameters
+from gluonts.mx.util import copy_parameters
 from gluonts.time_feature import (
     TimeFeature,
     get_lags_for_frequency,
@@ -47,13 +42,13 @@ from gluonts.transform import (
     SetField,
     Transformation,
     VstackFeatures,
+    InstanceSampler,
 )
 from gluonts.transform.feature import (
     DummyValueImputation,
     MissingValueImputation,
 )
 
-# Relative imports
 from ._network import DeepARPredictionNetwork, DeepARTrainingNetwork
 
 
@@ -87,7 +82,7 @@ class DeepAREstimator(GluonEstimator):
         Type of recurrent cells to use (available: 'lstm' or 'gru';
         default: 'lstm')
     dropoutcell_type
-        Type of dropout cells to use 
+        Type of dropout cells to use
         (available: 'ZoneoutCell', 'RNNZoneoutCell', 'VariationalDropoutCell' or 'VariationalZoneoutCell';
         default: 'ZoneoutCell')
     dropout_rate
@@ -124,6 +119,8 @@ class DeepAREstimator(GluonEstimator):
         This is a model optimization that does not affect the accuracy (default: 100)
     imputation_method
         One of the methods from ImputationStrategy
+    train_sampler
+        Controls the sampling of windows during training.
     alpha
         The scaling coefficient of the activation regularization
     beta
@@ -153,6 +150,7 @@ class DeepAREstimator(GluonEstimator):
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
         imputation_method: Optional[MissingValueImputation] = None,
+        train_sampler: InstanceSampler = ExpectedNumInstanceSampler(1.0),
         dtype: DType = np.float32,
         alpha: float = 0.0,
         beta: float = 0.0,
@@ -236,6 +234,8 @@ class DeepAREstimator(GluonEstimator):
             if imputation_method is not None
             else DummyValueImputation(self.distr_output.value_in_support)
         )
+
+        self.train_sampler = train_sampler
 
         self.alpha = alpha
         self.beta = beta
@@ -324,7 +324,7 @@ class DeepAREstimator(GluonEstimator):
                     is_pad_field=FieldName.IS_PAD,
                     start_field=FieldName.START,
                     forecast_start_field=FieldName.FORECAST_START,
-                    train_sampler=ExpectedNumInstanceSampler(num_instances=1),
+                    train_sampler=self.train_sampler,
                     past_length=self.history_length,
                     future_length=self.prediction_length,
                     time_series_fields=[

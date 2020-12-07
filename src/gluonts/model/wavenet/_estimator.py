@@ -11,31 +11,26 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-# Standard library imports
 import logging
 import re
-from typing import Dict, List, Optional
 from functools import partial
+from typing import Dict, List, Optional
 
-# Third-party imports
 import mxnet as mx
 import numpy as np
 
-# First-party imports
 from gluonts import transform
 from gluonts.core.component import validated
 from gluonts.dataset.common import DataEntry, Dataset
 from gluonts.dataset.field_names import FieldName
 from gluonts.dataset.loader import TrainDataLoader, ValidationDataLoader
-from gluonts.model.estimator import GluonEstimator
+from gluonts.mx.model.estimator import GluonEstimator
 from gluonts.model.predictor import Predictor
-from gluonts.mx.model.predictor import RepresentableBlockPredictor
 from gluonts.model.wavenet._network import WaveNet, WaveNetSampler
+from gluonts.mx.batchify import batchify
+from gluonts.mx.model.predictor import RepresentableBlockPredictor
 from gluonts.mx.trainer import Trainer
-from gluonts.support.util import (
-    copy_parameters,
-    get_hybrid_forward_input_names,
-)
+from gluonts.mx.util import copy_parameters, get_hybrid_forward_input_names
 from gluonts.time_feature import (
     get_seasonality,
     time_features_from_frequency_str,
@@ -48,12 +43,12 @@ from gluonts.transform import (
     Chain,
     ExpectedNumInstanceSampler,
     InstanceSplitter,
+    SelectFields,
     SetFieldIfNotPresent,
     SimpleTransformation,
     VstackFeatures,
-    SelectFields,
+    InstanceSampler,
 )
-from gluonts.mx.batchify import batchify
 
 
 class QuantizeScaled(SimpleTransformation):
@@ -98,44 +93,46 @@ class QuantizeScaled(SimpleTransformation):
 
 class WaveNetEstimator(GluonEstimator):
     """
-        Model with Wavenet architecture and quantized target.
+    Model with Wavenet architecture and quantized target.
 
-        Parameters
-        ----------
-        freq
-            Frequency of the data to train on and predict
-        prediction_length
-            Length of the prediction horizon
-        trainer
-            Trainer object to be used (default: Trainer())
-        cardinality
-            Number of values of the each categorical feature (default: [1])
-        embedding_dimension
-            Dimension of the embeddings for categorical features (the same
-            dimension is used for all embeddings, default: 5)
-        num_bins
-            Number of bins used for quantization of signal (default: 1024)
-        hybridize_prediction_net
-            Boolean (default: False)
-        n_residue
-            Number of residual channels in wavenet architecture (default: 24)
-        n_skip
-            Number of skip channels in wavenet architecture (default: 32)
-        dilation_depth
-            Number of dilation layers in wavenet architecture.
-            If set to None (default), dialation_depth is set such that the receptive length is at least
-            as long as typical seasonality for the frequency and at least 2 * prediction_length.
-        n_stacks
-            Number of dilation stacks in wavenet architecture (default: 1)
-        temperature
-            Temparature used for sampling from softmax distribution.
-            For temperature = 1.0 (default) sampling is according to estimated probability.
-        act_type
-            Activation type used after before output layer (default: "elu").
-            Can be any of 'elu', 'relu', 'sigmoid', 'tanh', 'softrelu', 'softsign'.
-        num_parallel_samples
-            Number of evaluation samples per time series to increase parallelism during inference.
-            This is a model optimization that does not affect the accuracy (default: 200)
+    Parameters
+    ----------
+    freq
+        Frequency of the data to train on and predict
+    prediction_length
+        Length of the prediction horizon
+    trainer
+        Trainer object to be used (default: Trainer())
+    cardinality
+        Number of values of the each categorical feature (default: [1])
+    embedding_dimension
+        Dimension of the embeddings for categorical features (the same
+        dimension is used for all embeddings, default: 5)
+    num_bins
+        Number of bins used for quantization of signal (default: 1024)
+    hybridize_prediction_net
+        Boolean (default: False)
+    n_residue
+        Number of residual channels in wavenet architecture (default: 24)
+    n_skip
+        Number of skip channels in wavenet architecture (default: 32)
+    dilation_depth
+        Number of dilation layers in wavenet architecture.
+        If set to None (default), dialation_depth is set such that the receptive length is at least
+        as long as typical seasonality for the frequency and at least 2 * prediction_length.
+    n_stacks
+        Number of dilation stacks in wavenet architecture (default: 1)
+    temperature
+        Temparature used for sampling from softmax distribution.
+        For temperature = 1.0 (default) sampling is according to estimated probability.
+    act_type
+        Activation type used after before output layer (default: "elu").
+        Can be any of 'elu', 'relu', 'sigmoid', 'tanh', 'softrelu', 'softsign'.
+    num_parallel_samples
+        Number of evaluation samples per time series to increase parallelism during inference.
+        This is a model optimization that does not affect the accuracy (default: 200)
+    train_sampler
+        Controls the sampling of windows during training.
     """
 
     @validated()
@@ -162,6 +159,7 @@ class WaveNetEstimator(GluonEstimator):
         temperature: float = 1.0,
         act_type: str = "elu",
         num_parallel_samples: int = 200,
+        train_sampler: InstanceSampler = ExpectedNumInstanceSampler(1.0),
     ) -> None:
         """
         Model with Wavenet architecture and quantized target.
@@ -211,6 +209,7 @@ class WaveNetEstimator(GluonEstimator):
         self.temperature = temperature
         self.act_type = act_type
         self.num_parallel_samples = num_parallel_samples
+        self.train_sampler = train_sampler
 
         seasonality = (
             get_seasonality(
@@ -359,7 +358,7 @@ class WaveNetEstimator(GluonEstimator):
                     is_pad_field=FieldName.IS_PAD,
                     start_field=FieldName.START,
                     forecast_start_field=FieldName.FORECAST_START,
-                    train_sampler=ExpectedNumInstanceSampler(num_instances=1),
+                    train_sampler=self.train_sampler,
                     past_length=self.context_length,
                     future_length=pred_length,
                     output_NTC=False,

@@ -11,28 +11,24 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-# Standard library imports
 import math
 from functools import partial
 from typing import Dict, List, Optional, Tuple
 
-# Third-party imports
 import numpy as np
 
 from gluonts.core.component import validated
-
-from gluonts.model.common import Tensor
-from .distribution import Distribution
-
-from gluonts.mx.distribution import Distribution
+from gluonts.mx import Tensor
+from gluonts.mx.distribution import Distribution, box_cox_transform, uniform
 from gluonts.mx.distribution.distribution import (
+    MAX_SUPPORT_VAL,
+    _sample_multiple,
     getF,
     softplus,
-    _sample_multiple,
 )
-from gluonts.mx.distribution import uniform, box_cox_transform
 from gluonts.mx.distribution.distribution_output import DistributionOutput
-from gluonts.mx.distribution.distribution import MAX_SUPPORT_VAL
+
+from .distribution import Distribution
 
 
 class GenPareto(Distribution):
@@ -157,7 +153,10 @@ class GenPareto(Distribution):
             return sample_X
 
         samples = _sample_multiple(
-            s, xi=self.xi, beta=self.beta, num_samples=num_samples,
+            s,
+            xi=self.xi,
+            beta=self.beta,
+            num_samples=num_samples,
         )
         return self.F.clip(
             data=samples, a_min=np.finfo(dtype).eps, a_max=np.finfo(dtype).max

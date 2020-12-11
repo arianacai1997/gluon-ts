@@ -81,7 +81,7 @@ class TabularPredictor(Predictor):
         self.prediction_length = prediction_length
 
     def predict(
-        self, dataset: Iterable[Dict], model=None, as_pandas=False
+        self, dataset: Iterable[Dict]
     ) -> Iterator[SampleForecast]:
         for entry in dataset:
             ts = to_pandas(entry)

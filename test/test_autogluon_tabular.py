@@ -1,8 +1,22 @@
+# Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
+# A copy of the License is located at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# or in the "license" file accompanying this file. This file is distributed
+# on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
+# express or implied. See the License for the specific language governing
+# permissions and limitations under the License.
+
+
 import pandas as pd
 import numpy as np
 from gluonts.nursery.autogluon_tabular import LocalTabularPredictor
 from gluonts.dataset.common import ListDataset
-from gluonts.evaluation import Evaluator
+from gluonts.dataset.util import to_pandas
 
 
 def test_autogluon_tabular(verbose=False):
@@ -48,32 +62,25 @@ def test_autogluon_tabular(verbose=False):
         ],
         freq="W-SUN",
     )
-
-    predictor = LocalTabularPredictor(freq="W-SUN", prediction_length=1,)
-    forecasts = predictor.predict(dataset)
+    prediction_length = 2
+    freq = "W-SUN"
+    predictor = LocalTabularPredictor(
+        freq=freq, prediction_length=prediction_length,
+    )
+    forecasts_it = predictor.predict(dataset)
+    forecasts = list(forecasts_it)
 
     # (optional) do evaluation
     if verbose:
-        evaluator = Evaluator(quantiles=[0.5])
-        tss = change_test(dataset, 10, "W-SUN")
-        agg_metrics, item_metrics = evaluator(iter(tss), iter(list(forecasts)))
-        print(agg_metrics)
-    return list(forecasts)
-
-
-def convert_df(data_iterator, freq):
-    for data_entry in data_iterator:
-        data = data_entry.copy()
-        index = pd.date_range(
-            start=data["start"], freq=freq, periods=data["target"].shape[-1],
-        )
-        data["ts"] = pd.DataFrame(index=index, data=data["target"].transpose())
-        yield data
-
-
-def change_test(dataset, prediction_length, freq):
-    for data_entry in convert_df(iter(list(dataset)), freq):
-        yield data_entry["ts"][-prediction_length:]
+        for i in range(len(forecasts)):
+            entry = list(dataset)[i]
+            ts = to_pandas(entry)
+            start_timestamp = ts.index[-1] + pd.tseries.frequencies.to_offset(
+                freq
+            )
+            assert forecasts[i].samples.shape[1] == prediction_length
+            assert forecasts[i].start_date == start_timestamp
+    return forecasts
 
 
 if __name__ == "__main__":

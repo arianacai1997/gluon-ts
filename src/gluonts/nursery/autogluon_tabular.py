@@ -80,7 +80,9 @@ class TabularPredictor(Predictor):
         self.freq = freq
         self.prediction_length = prediction_length
 
-    def predict(self, dataset: Iterable[Dict]) -> Iterator[SampleForecast]:
+    def predict(
+        self, dataset: Iterable[Dict]
+    ) -> Iterator[SampleForecast]:
         for entry in dataset:
             ts = to_pandas(entry)
             start = ts.index[-1] + pd.tseries.frequencies.to_offset(self.freq)

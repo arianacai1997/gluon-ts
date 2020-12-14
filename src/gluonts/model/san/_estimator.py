@@ -108,8 +108,7 @@ class SelfAttentionEstimator(GluonEstimator):
         if self.use_feat_dynamic_real:
             transforms.append(
                 AsNumpyArray(
-                    field=FieldName.FEAT_DYNAMIC_REAL,
-                    expected_ndim=2,
+                    field=FieldName.FEAT_DYNAMIC_REAL, expected_ndim=2,
                 )
             )
         else:
@@ -121,8 +120,7 @@ class SelfAttentionEstimator(GluonEstimator):
                         * (self.context_length + self.prediction_length),
                     ),
                     AsNumpyArray(
-                        field=FieldName.FEAT_DYNAMIC_REAL,
-                        expected_ndim=2,
+                        field=FieldName.FEAT_DYNAMIC_REAL, expected_ndim=2,
                     ),
                     # SwapAxes(input_fields=[FieldName.FEAT_DYNAMIC_REAL], axes=(0,1)),
                 ]
@@ -130,8 +128,7 @@ class SelfAttentionEstimator(GluonEstimator):
         if self.use_feat_dynamic_cat:
             transforms.append(
                 AsNumpyArray(
-                    field=FieldName.FEAT_DYNAMIC_CAT,
-                    expected_ndim=2,
+                    field=FieldName.FEAT_DYNAMIC_CAT, expected_ndim=2,
                 )
             )
         else:
@@ -160,29 +157,23 @@ class SelfAttentionEstimator(GluonEstimator):
         if self.use_feat_static_real:
             transforms.append(
                 AsNumpyArray(
-                    field=FieldName.FEAT_STATIC_REAL,
-                    expected_ndim=1,
+                    field=FieldName.FEAT_STATIC_REAL, expected_ndim=1,
                 )
             )
         else:
             transforms.extend(
                 [
                     SetField(
-                        output_field=FieldName.FEAT_STATIC_REAL,
-                        value=[],
+                        output_field=FieldName.FEAT_STATIC_REAL, value=[],
                     ),
                     AsNumpyArray(
-                        field=FieldName.FEAT_STATIC_REAL,
-                        expected_ndim=1,
+                        field=FieldName.FEAT_STATIC_REAL, expected_ndim=1,
                     ),
                 ]
             )
         if self.use_feat_static_cat:
             transforms.append(
-                AsNumpyArray(
-                    field=FieldName.FEAT_STATIC_CAT,
-                    expected_ndim=1,
-                )
+                AsNumpyArray(field=FieldName.FEAT_STATIC_CAT, expected_ndim=1,)
             )
         time_series_fields = [FieldName.OBSERVED_VALUES]
         if self.use_feat_dynamic_cat:

@@ -19,7 +19,7 @@ from gluonts.dataset.common import ListDataset
 from gluonts.dataset.util import to_pandas
 
 
-def test_autogluon_tabular(verbose=False):
+def test_autogluon_tabular():
     # create a dataset
     dataset = ListDataset(
         [
@@ -70,16 +70,11 @@ def test_autogluon_tabular(verbose=False):
     forecasts_it = predictor.predict(dataset)
     forecasts = list(forecasts_it)
 
-    # (optional) do evaluation
-    if verbose:
-        for i in range(len(forecasts)):
-            entry = list(dataset)[i]
-            ts = to_pandas(entry)
-            start_timestamp = ts.index[-1] + pd.tseries.frequencies.to_offset(
-                freq
-            )
-            assert forecasts[i].samples.shape[1] == prediction_length
-            assert forecasts[i].start_date == start_timestamp
+    for entry, forecast in zip(dataset, forecasts):
+        ts = to_pandas(entry)
+        start_timestamp = ts.index[-1] + pd.tseries.frequencies.to_offset(freq)
+        assert forecast.samples.shape[1] == prediction_length
+        assert forecast.start_date == start_timestamp
     return forecasts
 
 

@@ -26,7 +26,7 @@ from typing import (
 import numpy as np
 from pandas.tseries.holiday import USFederalHolidayCalendar as calendar
 import pandas as pd
-from autogluon.tabular import TabularPrediction as task
+from autogluon import TabularPrediction as task
 # First-party imports
 from gluonts.dataset.common import DataEntry, Dataset
 from gluonts.dataset.util import to_pandas
